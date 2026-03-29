@@ -5,9 +5,6 @@ import { Bot } from "grammy";
 import type { Config } from "./config.js";
 import { CharlieClient, type ContentBlock } from "./charlie-client.js";
 
-/** Telegram message length limit */
-const TELEGRAM_MAX_LENGTH = 4096;
-
 /** Max file size for base64 encoding (20 MB). Larger files get text-only description. */
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 
@@ -43,95 +40,6 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * Convert markdown to Telegram HTML.
- *
- * Handles bold, italic, inline code, and fenced code blocks.
- * Falls back to plain text if HTML parsing fails on send.
- */
-function markdownToHtml(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, (m) => {
-      const code = m.replace(/```\w*\n?/g, "").replace(/```$/g, "");
-      return `<pre>${code}</pre>`;
-    })
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/\*(.+?)\*/g, "<i>$1</i>");
-}
-
-/**
- * Split a long message into chunks that fit within Telegram's 4096-char limit.
- * Splits on newlines first, then on spaces, then hard-cuts as a last resort.
- */
-function splitMessage(text: string): string[] {
-  if (text.length <= TELEGRAM_MAX_LENGTH) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= TELEGRAM_MAX_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
-
-    let splitIndex = remaining.lastIndexOf("\n", TELEGRAM_MAX_LENGTH);
-    if (splitIndex <= 0) {
-      splitIndex = remaining.lastIndexOf(" ", TELEGRAM_MAX_LENGTH);
-    }
-    if (splitIndex <= 0) {
-      splitIndex = TELEGRAM_MAX_LENGTH;
-    }
-
-    chunks.push(remaining.slice(0, splitIndex));
-    remaining = remaining.slice(splitIndex).trimStart();
-  }
-
-  return chunks;
-}
-
-/**
- * Send Charlie's response back to the user.
- *
- * Converts markdown to HTML, splits long messages, and sends them.
- */
-async function sendCharlieResponse(
-  ctx: { reply: Function; chat: { id: number } },
-  response: string
-): Promise<void> {
-  const htmlContent = markdownToHtml(response.trim());
-  if (!htmlContent) return;
-
-  const chunks = splitMessage(htmlContent);
-  for (const chunk of chunks) {
-    try {
-      await ctx.reply(chunk, { parse_mode: "HTML" });
-    } catch {
-      // If HTML fails, fall back to plain text (strip tags)
-      const plain = chunk.replace(/<[^>]+>/g, "");
-      try {
-        await ctx.reply(plain);
-      } catch {
-        // Last resort -- skip this chunk
-      }
-    }
-  }
-}
-
-/**
- * Start a typing indicator that stays alive until cleared.
- * Returns the interval ID so callers can clear it.
- */
-function startTypingIndicator(ctx: { replyWithChatAction: Function }): ReturnType<typeof setInterval> {
-  ctx.replyWithChatAction("typing").catch(() => {});
-  return setInterval(() => {
-    ctx.replyWithChatAction("typing").catch(() => {});
-  }, 4000);
 }
 
 /**
@@ -241,8 +149,9 @@ function buildDocumentBlock(
 /**
  * Create and configure the grammY bot.
  *
- * The bot acts as a messenger: it receives Telegram messages,
- * forwards them to Charlie's Project API, and sends the response back.
+ * The bot acts as a messenger: it receives Telegram messages and forwards them
+ * to Charlie's Project API with a response_webhook URL. Charlie will POST
+ * the AI response back to the webhook when ready -- no polling needed.
  *
  * Supports: text, photos, voice messages, documents, videos, stickers, and locations.
  *
@@ -274,27 +183,17 @@ export function createBot(config: Config): Bot {
     const userName = ctx.from?.first_name || "Unknown";
 
     console.log(`[MSG] ${userName} (${chatId}): ${userMessage.substring(0, 100)}`);
-
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
-      const response = await charlie.sendMessage(
+      await charlie.sendMessage(
         conversationId,
         userMessage,
         { id: String(chatId), name: userName }
       );
-      clearInterval(typingInterval);
-      console.log(`[REPLY] -> ${response.substring(0, 100)}...`);
-      await sendCharlieResponse(ctx, response);
     } catch (error) {
-      clearInterval(typingInterval);
-      console.error(
-        `[ERROR] chat ${chatId}:`,
-        error instanceof Error ? error.message : error
-      );
-      await ctx.reply(
-        "Something went wrong while processing your message. Please try again."
-      );
+      console.error(`[ERROR] chat ${chatId}:`, error instanceof Error ? error.message : error);
+      await ctx.reply("Something went wrong while processing your message. Please try again.");
     }
   });
 
@@ -306,7 +205,7 @@ export function createBot(config: Config): Bot {
     const caption = ctx.message.caption || "";
     const userName = ctx.from?.first_name || "Unknown";
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
     let localPath: string | undefined;
 
     try {
@@ -328,26 +227,21 @@ export function createBot(config: Config): Bot {
           `[PHOTO] Sending as content_block (${formatFileSize(buffer.length)})`
         );
 
-        const response = await charlie.sendMessageWithFiles(
+        await charlie.sendMessageWithFiles(
           conversationId,
           commandText,
           [contentBlock],
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       } else {
         commandText += ` (${formatFileSize(buffer.length)}, too large to process)`;
-        const response = await charlie.sendMessage(
+        await charlie.sendMessage(
           conversationId,
           commandText,
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       }
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] photo from chat ${chatId}:`,
         error instanceof Error ? error.message : error
@@ -369,7 +263,7 @@ export function createBot(config: Config): Bot {
     const duration = voice.duration;
     const userName = ctx.from?.first_name || "Unknown";
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
     let localPath: string | undefined;
 
     try {
@@ -390,25 +284,20 @@ export function createBot(config: Config): Bot {
           `[VOICE] Sending as content_block (${formatFileSize(buffer.length)})`
         );
 
-        const response = await charlie.sendMessageWithFiles(
+        await charlie.sendMessageWithFiles(
           conversationId,
           commandText,
           [contentBlock],
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       } else {
-        const response = await charlie.sendMessage(
+        await charlie.sendMessage(
           conversationId,
           commandText,
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       }
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] voice from chat ${chatId}:`,
         error instanceof Error ? error.message : error
@@ -432,7 +321,7 @@ export function createBot(config: Config): Bot {
     const fileSize = doc.file_size || 0;
     const userName = ctx.from?.first_name || "Unknown";
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
     let localPath: string | undefined;
 
     try {
@@ -457,26 +346,21 @@ export function createBot(config: Config): Bot {
           `[DOC] Sending ${fileName} as ${isImage ? "image" : "document"} content_block (${formatFileSize(buffer.length)})`
         );
 
-        const response = await charlie.sendMessageWithFiles(
+        await charlie.sendMessageWithFiles(
           conversationId,
           commandText,
           [contentBlock],
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       } else {
         commandText += ` -- file too large to process inline`;
-        const response = await charlie.sendMessage(
+        await charlie.sendMessage(
           conversationId,
           commandText,
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       }
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] document from chat ${chatId}:`,
         error instanceof Error ? error.message : error
@@ -499,7 +383,7 @@ export function createBot(config: Config): Bot {
     const duration = video.duration;
     const userName = ctx.from?.first_name || "Unknown";
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
     let localPath: string | undefined;
 
     try {
@@ -523,26 +407,21 @@ export function createBot(config: Config): Bot {
           `[VIDEO] Sending as document content_block (${formatFileSize(buffer.length)})`
         );
 
-        const response = await charlie.sendMessageWithFiles(
+        await charlie.sendMessageWithFiles(
           conversationId,
           commandText,
           [contentBlock],
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       } else {
         commandText += ` (${formatFileSize(buffer.length)}, too large to process)`;
-        const response = await charlie.sendMessage(
+        await charlie.sendMessage(
           conversationId,
           commandText,
           { id: String(chatId), name: userName }
         );
-        clearInterval(typingInterval);
-        await sendCharlieResponse(ctx, response);
       }
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] video from chat ${chatId}:`,
         error instanceof Error ? error.message : error
@@ -563,15 +442,12 @@ export function createBot(config: Config): Bot {
     const sticker = ctx.message.sticker;
     const emoji = sticker.emoji || "unknown";
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
       const message = `User sent a sticker: ${emoji}`;
-      const response = await charlie.sendMessage(conversationId, message);
-      clearInterval(typingInterval);
-      await sendCharlieResponse(ctx, response);
+      await charlie.sendMessage(conversationId, message);
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] sticker from chat ${chatId}:`,
         error instanceof Error ? error.message : error
@@ -589,15 +465,12 @@ export function createBot(config: Config): Bot {
     const conversationId = `telegram-${chatId}`;
     const location = ctx.message.location;
 
-    const typingInterval = startTypingIndicator(ctx);
+    ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
       const message = `User shared location: lat=${location.latitude}, lng=${location.longitude}`;
-      const response = await charlie.sendMessage(conversationId, message);
-      clearInterval(typingInterval);
-      await sendCharlieResponse(ctx, response);
+      await charlie.sendMessage(conversationId, message);
     } catch (error) {
-      clearInterval(typingInterval);
       console.error(
         `[ERROR] location from chat ${chatId}:`,
         error instanceof Error ? error.message : error
