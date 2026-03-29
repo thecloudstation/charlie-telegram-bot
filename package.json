@@ -1,0 +1,27 @@
+{
+  "name": "charlie-telegram-bot",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram bot that forwards messages to Charlie's Project API",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=8.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx --watch src/main.ts",
+    "start": "tsc && node dist/main.js",
+    "start:dev": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "grammy": "^1.36.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2"
+  }
+}
