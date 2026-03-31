@@ -34,8 +34,9 @@ export type ContentBlock = ImageContentBlock | DocumentContentBlock;
 export class CharlieClient {
   private readonly apiUrl: string;
   private readonly projectId: string;
-  private readonly apiKey: string;
-  private readonly clientId: string;
+  private readonly apiKey?: string;
+  private readonly clientId?: string;
+  private readonly userToken?: string;
   private readonly agentTemplateId?: string;
   private readonly responseWebhookUrl: string;
 
@@ -44,8 +45,20 @@ export class CharlieClient {
     this.projectId = config.charlieProjectId;
     this.apiKey = config.charlieApiKey;
     this.clientId = config.charlieClientId;
+    this.userToken = config.charlieUserToken;
     this.agentTemplateId = config.charlieAgentTemplateId;
     this.responseWebhookUrl = `${config.webhookBaseUrl.replace(/\/+$/, "")}/charlie-webhook`;
+  }
+
+  /** Build auth headers — USER_TOKEN for local testing, API keys for production */
+  private getAuthHeaders(): Record<string, string> {
+    if (this.userToken) {
+      return { Authorization: `Bearer ${this.userToken}` };
+    }
+    return {
+      "x-api-key": this.apiKey || "",
+      "x-client-id": this.clientId || "",
+    };
   }
 
   /** Send a text message to Charlie. Response comes via webhook callback. */
@@ -98,8 +111,7 @@ export class CharlieClient {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": this.apiKey,
-        "x-client-id": this.clientId,
+        ...this.getAuthHeaders(),
       },
       body: JSON.stringify(body),
     });

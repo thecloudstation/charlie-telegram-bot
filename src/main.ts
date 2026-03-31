@@ -45,6 +45,10 @@ async function main() {
   const app = express();
   app.use(express.json());
 
+  app.get("/", (_req, res) => {
+    res.json({ status: "ok" });
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
   });
@@ -53,6 +57,8 @@ async function main() {
     res.sendStatus(200);
 
     const payload = req.body;
+    console.log(`[WEBHOOK] Received POST /charlie-webhook — conversation_id: ${payload?.conversation_id}, event_type: ${payload?.message?.event_type}`);
+
     const conversationId: string | undefined = payload?.conversation_id;
     const content: string | undefined = payload?.message?.content;
 
@@ -61,7 +67,10 @@ async function main() {
     // Extract chatId from conversation_id format "telegram-{chatId}"
     const chatIdStr = conversationId.replace(/^telegram-/, "");
     const chatId = Number(chatIdStr);
-    if (!chatId || isNaN(chatId)) return;
+    if (!chatId || isNaN(chatId)) {
+      console.warn(`[CHARLIE] Could not extract chatId from conversation_id: ${conversationId}`);
+      return;
+    }
 
     console.log(`[CHARLIE] Response for chat ${chatId}: ${content.substring(0, 100)}...`);
 
