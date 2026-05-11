@@ -7,6 +7,24 @@ import { createBot } from "./bot.js";
 
 const TELEGRAM_MAX_LENGTH = 4096;
 
+/**
+ * Match an [ESCALATE: <summary>] marker the agent emits to request human handoff.
+ * Anchored to end-of-message; agent is instructed to put it on its own line at the end.
+ */
+const ESCALATION_MARKER_RE = /\[ESCALATE:\s*([^\]]+?)\]\s*$/m;
+
+/**
+ * Extract an escalation marker from agent content.
+ * Returns the cleaned content (with marker stripped) and the summary, if present.
+ */
+function extractEscalation(content: string): { content: string; summary?: string } {
+  const match = content.match(ESCALATION_MARKER_RE);
+  if (!match) return { content };
+  const summary = match[1].trim();
+  const cleaned = content.replace(ESCALATION_MARKER_RE, "").trimEnd();
+  return { content: cleaned, summary };
+}
+
 function markdownToHtml(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, (m) => {
@@ -74,19 +92,47 @@ async function main() {
 
     console.log(`[CHARLIE] Response for chat ${chatId}: ${content.substring(0, 100)}...`);
 
-    const htmlContent = markdownToHtml(content.trim());
-    if (!htmlContent) return;
+    // Parse out the [ESCALATE: ...] marker (if any) BEFORE sending to the customer
+    const { content: customerContent, summary: escalationSummary } = extractEscalation(content.trim());
 
-    const chunks = splitMessage(htmlContent);
-    for (const chunk of chunks) {
-      try {
-        await bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" });
-      } catch {
-        const plain = chunk.replace(/<[^>]+>/g, "");
+    const htmlContent = markdownToHtml(customerContent);
+    if (htmlContent) {
+      const chunks = splitMessage(htmlContent);
+      for (const chunk of chunks) {
         try {
-          await bot.api.sendMessage(chatId, plain);
+          await bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" });
         } catch {
-          // Skip chunk
+          const plain = chunk.replace(/<[^>]+>/g, "");
+          try {
+            await bot.api.sendMessage(chatId, plain);
+          } catch {
+            // Skip chunk
+          }
+        }
+      }
+    }
+
+    // If the agent escalated, forward a one-message summary to the escalation chat
+    if (escalationSummary) {
+      if (!config.escalationChatId) {
+        console.warn(
+          `[ESCALATION] Agent emitted [ESCALATE: ${escalationSummary}] but ESCALATION_CHAT_ID is not set — dropping forward.`
+        );
+      } else {
+        const forwardMsg =
+          `🔔 Escalation from chat ${chatId}\n\n` +
+          `Summary: ${escalationSummary}\n\n` +
+          `Conversation ID: ${conversationId}`;
+        try {
+          await bot.api.sendMessage(config.escalationChatId, forwardMsg);
+          console.log(
+            `[ESCALATION] Forwarded chat ${chatId} → ${config.escalationChatId}: ${escalationSummary.substring(0, 80)}`
+          );
+        } catch (err) {
+          console.error(
+            `[ESCALATION] Failed to forward to chat ${config.escalationChatId}:`,
+            err instanceof Error ? err.message : err
+          );
         }
       }
     }
@@ -110,17 +156,35 @@ async function main() {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  // --- Start grammY polling ---
-  await bot.api.deleteWebhook();
-
-  await bot.start({
-    onStart: (botInfo) => {
-      console.log(`Bot @${botInfo.username} is running (polling mode)`);
-      console.log(`Charlie API: ${config.charlieApiUrl}`);
-      console.log(`Project ID: ${config.charlieProjectId}`);
-      console.log(`Charlie webhook: ${config.webhookBaseUrl}/charlie-webhook`);
-    },
-  });
+  // --- Start grammY polling with retry on 409 conflict ---
+  const MAX_RETRIES = 5;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await bot.api.deleteWebhook();
+      await bot.start({
+        onStart: (botInfo) => {
+          console.log(`Bot @${botInfo.username} is running (polling mode)`);
+          console.log(`Charlie API: ${config.charlieApiUrl}`);
+          console.log(`Project ID: ${config.charlieProjectId}`);
+          console.log(`Charlie webhook: ${config.webhookBaseUrl}/charlie-webhook`);
+        },
+      });
+      break; // If bot.start() resolves cleanly, exit loop
+    } catch (error: unknown) {
+      const is409 =
+        error instanceof Error &&
+        (error.message.includes("409") || error.message.includes("Conflict"));
+      if (is409 && attempt < MAX_RETRIES) {
+        const delay = attempt * 5;
+        console.warn(
+          `[RETRY] 409 Conflict on attempt ${attempt}/${MAX_RETRIES}. Waiting ${delay}s before retry...`
+        );
+        await new Promise((r) => setTimeout(r, delay * 1000));
+      } else {
+        throw error;
+      }
+    }
+  }
 }
 
 main().catch((error) => {

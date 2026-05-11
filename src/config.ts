@@ -19,6 +19,8 @@ export interface Config {
   charlieUserToken?: string;
   /** Optional agent template ID */
   charlieAgentTemplateId?: string;
+  /** Telegram chat ID to forward escalations to (when agent emits [ESCALATE: ...] marker) */
+  escalationChatId?: number;
 }
 
 function requireEnv(name: string): string {
@@ -52,6 +54,9 @@ export function loadConfig(): Config {
     charlieClientId: clientId,
     charlieUserToken: userToken,
     charlieAgentTemplateId: process.env.CHARLIE_AGENT_TEMPLATE_ID || undefined,
+    escalationChatId: process.env.ESCALATION_CHAT_ID
+      ? Number(process.env.ESCALATION_CHAT_ID)
+      : undefined,
   };
 }
 
